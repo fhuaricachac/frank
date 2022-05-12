@@ -1,0 +1,123 @@
+ALTER PROC [dbo].[SP_CreateCarteraPyme] AS
+BEGIN
+
+--###generar proceso para salvar carterapyme, meta historica
+if( object_id('Landing.CarteraPyme') is not null) 
+TRUNCATE TABLE Landing.CarteraPyme
+
+--#################### TIPO DE CAMBIO SET -> DIA DE AYER
+DECLARE @TIPO_CAMBIO DECIMAL(23,4)
+
+SET @TIPO_CAMBIO =(SELECT TipoCambio FROM [Landing].[TBL_TIPO_CAMBIO] WHERE FECHA =  CAST ( DATEADD(HOUR,-5,GETDATE())-1 AS DATE))
+
+--PRINT @TIPO_CAMBIO
+--############################################3
+
+;WITH CARTERA AS (
+    SELECT *
+    FROM (
+        SELECT  
+        DEABNK  Numero_de_banco,
+        DEABRN  Agencia,
+        DEACCY  Moneda,
+        DEAGLN  Cuenta_contable,
+        DEAACC  Cuenta_operativa,
+        DEACUN  Codigo_Cliente,
+        DEARTB  Tabla_tarifas,
+        DEARTE  Tasa_interes,
+        DEATRM  Plazo,
+        DEATYP  Tipo_Producto,
+        DEAPRO  Codigo_Producto,
+        DEASTS  Estatus_00,
+        DEAUC3  Código_Vendedor,
+        DEAOFI  Codigo_Funcionario_00,
+        DEAOF2  Codigo_Funcionario_01,
+        DEASTS  Estatus_01,
+        --CASE WHEN LEN(DEASDD) = 2 THEN DEASDD ELSE CONCAT('0',DEASDD) END DIA_APERT_PTMO,
+CASE WHEN DEASDD > 9 THEN CAST(DEASDD AS VARCHAR(20)) ELSE CONCAT('0',CAST(DEASDD AS VARCHAR(20))) END DIA_APERT_PTMO,
+        CASE WHEN LEN(DEASDM) = 2 THEN DEASDM ELSE CONCAT('0',DEASDM) END   MES_APERT_PTMO,
+        DEASDY  ANIO_APERT_PTMO,
+        DEAPRI  SALDO_PRINCIPAL,
+        DEAOAM  MONTO_ORIGINAL,
+        DEAMEI  SALDO_INTERESES,
+
+        CASE WHEN DEACCY ='USD' THEN DEAPRI * @TIPO_CAMBIO ELSE DEAPRI END SALDO_PRINCIPAL_SOLES,
+        CASE WHEN DEACCY ='USD' THEN DEAOAM * @TIPO_CAMBIO ELSE DEAOAM END MONTO_ORIGINAL_SOLES,
+        CASE WHEN DEACCY ='USD' THEN DEAMEI * @TIPO_CAMBIO ELSE DEAMEI END SALDO_INTERESESL_SOLES,
+
+        DEAMAD  DIA_VENCIMIENTO,
+        DEAMAM  MES_VENCIMIENTO,
+        DEAMAY  ANIO_VENCIMIENTO,
+        DEASTS  ESTADO_OPERACION,
+        DEAACD  TIPO_PROCESO,
+        CASE WHEN LEN(DEASDY) = 2 THEN 
+                                        CASE WHEN DEASDY > 80 THEN CONCAT('19',DEASDY)
+                                                ELSE CONCAT('20',DEASDY) END
+            ELSE CONCAT('200',DEASDY) END ANIO_COMP_APERT_PTMO,
+        CASE WHEN DEASDM > 9 THEN CAST(DEASDM AS VARCHAR(20)) ELSE CONCAT('0',CAST(DEASDM AS VARCHAR(20))) END MES_COMP_APERT_PTMO,
+        CASE WHEN X.[Código Cliente Banco] IS NOT NULL THEN 1 ELSE 0 END AS ClienteMigrado
+
+        FROM [Landing].[DEALS_AF] LEFT JOIN [Landing].[ClientesResectPymeEmp] X ON DEACUN = X.[Código Cliente Banco]
+                                    
+                                    
+        ) B
+        WHERE B.ESTADO_OPERACION <> 'C' AND  
+                ( B.Codigo_Cliente IN (select [Código Cliente Banco] from [Landing].[ClientesResectPymeEmp]) OR
+                  B.Codigo_Producto IN ('SYCC','SYCD','SYCO','SYCP','SYAC','SYAD','SYAO','SYAP','SYCG','SYCH','SYCS','SYCT','SYAG','SYAH','SYAS','SYAT')-- OR
+                  --(B.ANIO_COMP_APERT_PTMO >= '2021' AND B.MES_APERT_PTMO >= '6' AND  -- MAYORES A 202106 DE LOS ASESORES
+                        --B.Codigo_Funcionario_00 IN (select A.COD_ASESOR from Landing.MetasPyme A )
+                  --)
+            )
+)
+, FUNCIONARIOS AS (
+
+    select * from (
+        select a.*,
+         ROW_NUMBER() OVER ( PARTITION BY CodigoFuncionario ORDER BY CodigoFuncionario,FechaIngreso desc  ) REG01
+    from [Landing].[TBL_FUNCIONARIOS] a
+    ) a
+    where a.reg01 =1
+)
+, DIMPRODUCTO AS (
+        SELECT * FROM (
+        SELECT A.*,
+            ROW_NUMBER() OVER (PARTITION BY  A.CodigoProducto ORDER BY  A.CodigoProducto) REG
+        FROM [Landing].[DimProducto] A
+        WHERE A.CodigoProducto <> 'ZZZZ' 
+        ) A
+        WHERE  A.REG = 1
+)
+
+, CARTERA_01 AS (
+    select A.*,
+        CASE WHEN A.MONTO_ORIGINAL_SOLES <= 30000 THEN '[ <= 30,000]'
+            WHEN A.MONTO_ORIGINAL_SOLES > 30000 THEN '[ > 30,000]'
+        END SEGMENTO_OPERACION_SOLES,
+
+        CASE WHEN ANIO_COMP_APERT_PTMO = CONVERT(VARCHAR(4), DATEADD(DAY,-1,DATEADD(HOUR,-5,GETDATE()-1)),112) AND --getdate -
+            MES_APERT_PTMO = MONTH(DATEADD(DAY,-1,DATEADD(HOUR,-5,GETDATE()-1)))    THEN 'OP.VENTA'  --getdate -
+            ELSE 'OP.ACTIVA' END TIPO_OPERACION,
+        ISNULL(CASE WHEN A.ClienteMigrado = 1 THEN (SELECT X.CodAsesor FROM [Landing].[ClientesResectPymeEmp] X
+                                    WHERE A.Codigo_Cliente = X.[Código Cliente Banco] )
+                        ELSE B.COD_DWH END,
+        A.Codigo_Funcionario_00) Codigo_Funcionario_02,
+        CONVERT(VARCHAR(6), DATEADD(DAY,-1,DATEADD(HOUR,-5,GETDATE()-1)),112) PeriodoCorte, --getdate -
+        CONCAT(A.ANIO_COMP_APERT_PTMO,A.MES_COMP_APERT_PTMO,DIA_APERT_PTMO) FECHA_PTMO,
+        M.PRODUCTO, R.nomCompleto NomCompletoClnt, R.nroDocumentoLegal
+
+    from CARTERA A 
+                LEFT JOIN FUNCIONARIOS B ON A.Codigo_Funcionario_00 = B.CodigoFuncionario
+                LEFT JOIN [Landing].[PBIPRO] F ON a.Cuenta_contable = F.PROCCB
+                LEFT JOIN DIMPRODUCTO M ON F.PROCPR = M.CodigoProducto
+                LEFT JOIN [Landing].[DimCliente] R ON R.nroClienteIBS = A.Codigo_Cliente
+    )
+insert into Landing.CarteraPyme
+SELECT * 
+FROM CARTERA_01 A 
+--WHERE A.ANIO_COMP_APERT_PTMO >= '2021' AND A.MES_APERT_PTMO = '8'
+--WHERE A.Cuenta_operativa IN (
+--SELECT A.numero_credito FROM [Landing].[TBL_VENTAS] A WHERE A.numero_credito IS NOT NULL )
+
+delete Landing.CarteraPyme  where Cuenta_operativa in ('479091170','297548832')
+
+END
